@@ -56,12 +56,6 @@ impl EngineerRegistry {
         assert!(record.issuer == issuer, "not the issuer");
         record.active = false;
         env.storage().persistent().set(&engineer_key(&engineer), &record);
-        
-        // Emit revocation event
-        env.events().publish(
-            (symbol_short!("REVOKE"), engineer.clone()),
-            (issuer, env.ledger().timestamp())
-        );
     }
 
     pub fn get_engineer(env: Env, engineer: Address) -> Engineer {
