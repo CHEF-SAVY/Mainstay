@@ -13,7 +13,6 @@ pub enum ContractError {
     DuplicateAsset = 2,
     UnauthorizedAdmin = 3,
     UnauthorizedOwner = 4,
-    AssetCountOverflow = 5,
 }
 
 #[contracttype]
@@ -63,9 +62,7 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::DuplicateAsset);
         }
 
-        let id: u64 = env.storage().instance().get(&ASSET_COUNT).unwrap_or(0u64)
-            .checked_add(1)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AssetCountOverflow));
+        let id: u64 = env.storage().instance().get(&ASSET_COUNT).unwrap_or(0) + 1;
         let asset = Asset {
             asset_id: id,
             asset_type: asset_type.clone(),
@@ -232,7 +229,7 @@ mod tests {
     use super::*;
     use soroban_sdk::{
         symbol_short,
-        testutils::{Address as _, Events, storage::Persistent as _},
+        testutils::{Address as _, Events},
         Env, String,
     };
     use soroban_sdk::testutils::storage::Persistent;
@@ -346,18 +343,16 @@ mod tests {
         
         let id = client.register_asset(&asset_type, &metadata, &owner);
 
-        // Verify TTL is set for asset storage entry (must be accessed inside contract context)
-        env.as_contract(&contract_id, || {
-            use soroban_sdk::testutils::storage::Persistent as _;
-            let asset_ttl = env.storage().persistent().get_ttl(&asset_key(id));
-            assert!(asset_ttl > 0, "Asset TTL should be extended");
+        // Verify TTL is set for asset storage entry
+        let asset_ttl = env.storage().persistent().get_ttl(&asset_key(id));
+        assert!(asset_ttl > 0, "Asset TTL should be extended");
 
-            let meta_bytes = Bytes::from(metadata.to_xdr(&env));
-            let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
-            let dk = dedup_key(&owner, &meta_hash);
-            let dedup_ttl = env.storage().persistent().get_ttl(&dk);
-            assert!(dedup_ttl > 0, "Deduplication key TTL should be extended");
-        });
+        // Verify TTL is set for deduplication key
+        let meta_bytes = Bytes::from(metadata.to_xdr(&env));
+        let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
+        let dk = dedup_key(&owner, &meta_hash);
+        let dedup_ttl = env.storage().persistent().get_ttl(&dk);
+        assert!(dedup_ttl > 0, "Deduplication key TTL should be extended");
     }
 
     #[test]
@@ -370,17 +365,9 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize_admin(&admin);
 
-        // The upgrade call passes auth check; it panics only because the WASM hash
-        // doesn't exist in the test environment (not an auth failure).
         let new_wasm_hash = BytesN::from_array(&env, &[0xabu8; 32]);
-        let result = client.try_upgrade(&admin, &new_wasm_hash);
-        // Should NOT be an UnauthorizedAdmin error — admin is authorized
-        assert_ne!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::UnauthorizedAdmin as u32,
-            ))),
-        );
+        // Should not panic — admin is authorized
+        client.upgrade(&admin, &new_wasm_hash);
     }
 
     #[test]
@@ -618,32 +605,6 @@ mod tests {
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
                 ContractError::DuplicateAsset as u32,
-            ))),
-        );
-    }
-
-    #[test]
-    fn test_asset_count_overflow_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(AssetRegistry, ());
-        let client = AssetRegistryClient::new(&env, &contract_id);
-
-        // Manually set ASSET_COUNT to u64::MAX to simulate overflow boundary
-        env.as_contract(&contract_id, || {
-            env.storage().instance().set(&ASSET_COUNT, &u64::MAX);
-        });
-
-        let owner = Address::generate(&env);
-        let result = client.try_register_asset(
-            &symbol_short!("GENSET"),
-            &String::from_str(&env, "Overflow test asset"),
-            &owner,
-        );
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::AssetCountOverflow as u32,
             ))),
         );
     }
