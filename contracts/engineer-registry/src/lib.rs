@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_with_error, symbol_short, Address, BytesN, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_with_error, symbol_short, Address, BytesN, Env, Symbol, Vec};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -31,6 +31,10 @@ fn trusted_key(issuer: &Address) -> (Symbol, Address) {
     (symbol_short!("TRUSTED"), issuer.clone())
 }
 
+fn issuer_engineers_key(issuer: &Address) -> (Symbol, Address) {
+    (symbol_short!("ISS_ENGS"), issuer.clone())
+}
+
 #[contract]
 pub struct EngineerRegistry;
 
@@ -50,13 +54,24 @@ impl EngineerRegistry {
         let record = Engineer {
             address: engineer.clone(),
             credential_hash,
-            issuer,
+            issuer: issuer.clone(),
             active: true,
             issued_at: env.ledger().timestamp(),
         };
         env.storage()
             .persistent()
             .set(&engineer_key(&engineer), &record);
+
+        // Track issuer → engineers mapping
+        let mut list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&issuer_engineers_key(&issuer))
+            .unwrap_or(Vec::new(&env));
+        list.push_back(engineer.clone());
+        env.storage()
+            .persistent()
+            .set(&issuer_engineers_key(&issuer), &list);
     }
 
     pub fn verify_engineer(env: Env, engineer: Address) -> bool {
@@ -121,6 +136,14 @@ impl EngineerRegistry {
             panic!("Only admin can remove trusted issuers");
         }
         env.storage().instance().remove(&trusted_key(&issuer));
+    }
+
+    /// Returns all engineer addresses credentialed by the given issuer.
+    pub fn get_engineers_by_issuer(env: Env, issuer: Address) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&issuer_engineers_key(&issuer))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Admin-only: upgrade the contract WASM to a new hash.
@@ -256,6 +279,80 @@ mod tests {
                 ContractError::UnauthorizedAdmin as u32,
             ))),
         );
+    }
+
+    // --- get_engineers_by_issuer tests ---
+
+    #[test]
+    fn test_get_engineers_by_issuer_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EngineerRegistry, ());
+        let client = EngineerRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let result = client.get_engineers_by_issuer(&issuer);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_get_engineers_by_issuer_single() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EngineerRegistry, ());
+        let client = EngineerRegistryClient::new(&env, &contract_id);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.register_engineer(&engineer, &hash, &issuer);
+
+        let list = client.get_engineers_by_issuer(&issuer);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.get(0).unwrap(), engineer);
+    }
+
+    #[test]
+    fn test_get_engineers_by_issuer_multiple() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EngineerRegistry, ());
+        let client = EngineerRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let e1 = Address::generate(&env);
+        let e2 = Address::generate(&env);
+        let e3 = Address::generate(&env);
+
+        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer);
+        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer);
+        client.register_engineer(&e3, &BytesN::from_array(&env, &[3u8; 32]), &issuer);
+
+        let list = client.get_engineers_by_issuer(&issuer);
+        assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn test_get_engineers_by_issuer_isolated_per_issuer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EngineerRegistry, ());
+        let client = EngineerRegistryClient::new(&env, &contract_id);
+
+        let issuer_a = Address::generate(&env);
+        let issuer_b = Address::generate(&env);
+        let e1 = Address::generate(&env);
+        let e2 = Address::generate(&env);
+
+        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer_a);
+        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer_b);
+
+        // Each issuer only sees their own engineers
+        assert_eq!(client.get_engineers_by_issuer(&issuer_a).len(), 1);
+        assert_eq!(client.get_engineers_by_issuer(&issuer_b).len(), 1);
+        assert_eq!(client.get_engineers_by_issuer(&issuer_a).get(0).unwrap(), e1);
+        assert_eq!(client.get_engineers_by_issuer(&issuer_b).get(0).unwrap(), e2);
     }
 }
 
