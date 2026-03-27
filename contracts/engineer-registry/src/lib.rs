@@ -22,6 +22,14 @@ fn engineer_key(addr: &Address) -> (Symbol, Address) {
     (symbol_short!("ENG"), addr.clone())
 }
 
+fn admin_key() -> Symbol {
+    symbol_short!("ADMIN")
+}
+
+fn trusted_key(issuer: &Address) -> (Symbol, Address) {
+    (symbol_short!("TRUSTED"), issuer.clone())
+}
+
 #[contract]
 pub struct EngineerRegistry;
 
@@ -58,8 +66,9 @@ impl EngineerRegistry {
             .unwrap_or(false)
     }
 
-    pub fn revoke_credential(env: Env, engineer: Address, issuer: Address) {
-        issuer.require_auth();
+    pub fn revoke_credential(env: Env, engineer: Address) {
+        let caller = env.invoker();
+        let admin = get_admin(env.clone());
         let mut record: Engineer = env
             .storage()
             .persistent()
@@ -79,12 +88,45 @@ impl EngineerRegistry {
             .get(&engineer_key(&engineer))
             .expect("engineer not found")
     }
+
+    pub fn initialize_admin(env: Env, admin: Address) {
+        if env.storage().instance().has(&admin_key()) {
+            panic!("admin already initialized");
+        }
+        env.storage().instance().set(&admin_key(), &admin);
+    }
+
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().instance().get(&admin_key())
+            .expect("admin not initialized")
+    }
+
+    pub fn is_trusted_issuer(env: Env, issuer: Address) -> bool {
+        env.storage().instance().has(&trusted_key(&issuer))
+    }
+
+    pub fn add_trusted_issuer(env: Env, issuer: Address) {
+        let admin = get_admin(env.clone());
+        if env.invoker() != admin {
+            panic!("Only admin can add trusted issuers");
+        }
+        env.storage().instance().set(&trusted_key(&issuer), &());
+        env.storage().instance().extend_ttl(&trusted_key(&issuer), 518400, 518400);
+    }
+
+    pub fn remove_trusted_issuer(env: Env, issuer: Address) {
+        let admin = get_admin(env.clone());
+        if env.invoker() != admin {
+            panic!("Only admin can remove trusted issuers");
+        }
+        env.storage().instance().remove(&trusted_key(&issuer));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, BytesN, Env};
+    use soroban_sdk::{testutils::Address as _, BytesN, Env, Symbol};
 
     #[test]
     fn test_register_verify_revoke() {
@@ -95,12 +137,15 @@ mod tests {
 
         let engineer = Address::generate(&env);
         let issuer = Address::generate(&env);
+        let admin = Address::generate(&env);
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
+        client.initialize_admin(&admin);
+        client.add_trusted_issuer(&issuer);
         client.register_engineer(&engineer, &hash, &issuer);
         assert!(client.verify_engineer(&engineer));
 
-        client.revoke_credential(&engineer, &issuer);
+        client.revoke_credential(&engineer);
         assert!(!client.verify_engineer(&engineer));
     }
 
@@ -114,8 +159,11 @@ mod tests {
 
         let engineer = Address::generate(&env);
         let issuer = Address::generate(&env);
+        let admin = Address::generate(&env);
         let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
 
+        client.initialize_admin(&admin);
+        client.add_trusted_issuer(&issuer);
         client.register_engineer(&engineer, &zero_hash, &issuer);
     }
 
@@ -156,3 +204,4 @@ mod tests {
         assert!(engineer_ttl > 0, "Engineer TTL should be extended after revoke");
     }
 }
+
