@@ -2,7 +2,7 @@
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env, String, Symbol,
+    Bytes, BytesN, Env, String, Symbol,
 };
 
 #[contracterror]
@@ -175,6 +175,37 @@ impl AssetRegistry {
         );
     }
 
+    pub fn transfer_asset(env: Env, asset_id: u64, current_owner: Address, new_owner: Address) {
+        current_owner.require_auth();
+
+        let mut asset: Asset = env
+            .storage()
+            .persistent()
+            .get(&asset_key(asset_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::AssetNotFound));
+
+        if asset.owner != current_owner {
+            panic_with_error!(&env, ContractError::UnauthorizedOwner);
+        }
+
+        // Move dedup key to new owner
+        let hash: BytesN<32> = env
+            .crypto()
+            .sha256(&Bytes::from(asset.metadata.clone().to_xdr(&env)))
+            .into();
+        env.storage().persistent().remove(&dedup_key(&current_owner, &hash));
+        env.storage().persistent().set(&dedup_key(&new_owner, &hash), &asset_id);
+
+        asset.owner = new_owner.clone();
+        env.storage().persistent().set(&asset_key(asset_id), &asset);
+        env.storage().persistent().extend_ttl(&asset_key(asset_id), 518400, 518400);
+
+        env.events().publish(
+            (symbol_short!("TRANSFER"), asset_id),
+            (current_owner, new_owner, env.ledger().timestamp()),
+        );
+    }
+
     /// Admin-only: upgrade the contract WASM to a new hash.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         admin.require_auth();
@@ -201,6 +232,7 @@ mod tests {
         testutils::{Address as _, Events},
         Env, String,
     };
+    use soroban_sdk::testutils::storage::Persistent;
 
     use crate::AssetRegistryClient;
 
@@ -404,8 +436,8 @@ mod tests {
             &String::from_str(&env, "Refurbished spec v2"),
         );
 
-        let events = env.events().all();
-        assert!(events.len() >= 2); // registration + metadata update
+        // env.events().all() reflects only the most recent contract call
+        assert_eq!(env.events().all().len(), 1);
     }
 
     #[test]
@@ -455,6 +487,92 @@ mod tests {
                 ContractError::AssetNotFound as u32,
             ))),
         );
+    }
+
+    #[test]
+    fn test_transfer_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        client.transfer_asset(&id, &owner, &new_owner);
+
+        let asset = client.get_asset(&id);
+        assert_eq!(asset.owner, new_owner);
+    }
+
+    #[test]
+    fn test_transfer_asset_non_owner_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        let result = client.try_transfer_asset(&id, &attacker, &new_owner);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedOwner as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_transfer_asset_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        client.transfer_asset(&id, &owner, &new_owner);
+
+        // env.events().all() reflects only the most recent contract call
+        assert_eq!(env.events().all().len(), 1);
+    }
+
+    #[test]
+    fn test_transfer_updates_dedup_so_new_owner_can_register_same_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let metadata = String::from_str(&env, "CAT-3516");
+
+        let id = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner);
+        client.transfer_asset(&id, &owner, &new_owner);
+
+        // Original owner can now register the same metadata again (dedup key was moved)
+        let id2 = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner);
+        assert_ne!(id, id2);
     }
 
     #[test]
