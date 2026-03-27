@@ -835,6 +835,29 @@ mod tests {
     }
 
     #[test]
+    fn test_submit_maintenance_unregistered_engineer_should_panic() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, _, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let unregistered = Address::generate(&env);
+
+        let result = client.try_submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "Should fail"),
+            &unregistered,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedEngineer as u32,
+            ))),
+        );
+    }
+
+    #[test]
     fn test_collateral_score_caps_at_100() {
         let env = Env::default();
         env.mock_all_auths();
