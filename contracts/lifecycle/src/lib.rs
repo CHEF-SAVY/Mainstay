@@ -1389,6 +1389,38 @@ mod tests {
     }
 
     #[test]
+    fn test_task_weight_tiers() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Minor: OIL_CHG = 2
+        client.submit_maintenance(&asset_id, &symbol_short!("OIL_CHG"), &String::from_str(&env, ""), &engineer);
+        assert_eq!(client.get_collateral_score(&asset_id), 2);
+
+        client.reset_score(&admin, &asset_id);
+
+        // Medium: FILTER = 5
+        client.submit_maintenance(&asset_id, &symbol_short!("FILTER"), &String::from_str(&env, ""), &engineer);
+        assert_eq!(client.get_collateral_score(&asset_id), 5);
+
+        client.reset_score(&admin, &asset_id);
+
+        // Major: ENGINE = 10
+        client.submit_maintenance(&asset_id, &symbol_short!("ENGINE"), &String::from_str(&env, ""), &engineer);
+        assert_eq!(client.get_collateral_score(&asset_id), 10);
+
+        client.reset_score(&admin, &asset_id);
+
+        // Unknown type = 3
+        client.submit_maintenance(&asset_id, &symbol_short!("UNKNOWN"), &String::from_str(&env, ""), &engineer);
+        assert_eq!(client.get_collateral_score(&asset_id), 3);
+    }
+
+    #[test]
     fn test_non_admin_cannot_reset_score() {
         let env = Env::default();
         env.mock_all_auths();
