@@ -23,6 +23,7 @@ pub struct Asset {
     pub metadata: String,
     pub owner: Address,
     pub registered_at: u64,
+    pub metadata_updated_at: u64,
 }
 
 const ASSET_COUNT: Symbol = symbol_short!("A_COUNT");
@@ -97,6 +98,7 @@ impl AssetRegistry {
             metadata,
             owner: owner.clone(),
             registered_at: env.ledger().timestamp(),
+            metadata_updated_at: env.ledger().timestamp(),
         };
         env.storage().persistent().set(&asset_key(id), &asset);
         env.storage().persistent().extend_ttl(&asset_key(id), 518400, 518400); // Extend TTL for persistent storage entries to prevent data loss
@@ -214,6 +216,7 @@ impl AssetRegistry {
         // Store new dedup key and updated asset
         env.storage().persistent().set(&new_dk, &asset_id);
         asset.metadata = new_metadata.clone();
+        asset.metadata_updated_at = env.ledger().timestamp();
         env.storage().persistent().set(&asset_key(asset_id), &asset);
 
         env.events().publish(
@@ -498,6 +501,35 @@ mod tests {
     }
 
     #[test]
+    fn test_update_metadata_stamps_metadata_updated_at() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "Original spec"),
+            &owner,
+        );
+
+        // Advance ledger time before updating
+        env.ledger().with_mut(|li| li.timestamp += 1000);
+        let update_time = env.ledger().timestamp();
+
+        client.update_asset_metadata(
+            &id,
+            &owner,
+            &String::from_str(&env, "Refurbished spec v2"),
+        );
+
+        let asset = client.get_asset(&id);
+        assert_eq!(asset.metadata_updated_at, update_time);
+        assert!(asset.metadata_updated_at > asset.registered_at);
+    }
+
+    #[test]
     fn test_update_metadata_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
@@ -708,8 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn test_asset_exists_returns_false_for_nonexistent_asset() {
-        let env = Env::default();
+    fn test_asset_exists_returns_false_for_nonexistent_asset() {        let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
