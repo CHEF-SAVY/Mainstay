@@ -17,6 +17,7 @@ pub struct Engineer {
     pub issuer: Address,
     pub active: bool,
     pub issued_at: u64,
+    pub expires_at: u64,
 }
 
 fn engineer_key(addr: &Address) -> (Symbol, Address) {
@@ -45,6 +46,7 @@ impl EngineerRegistry {
         engineer: Address,
         credential_hash: BytesN<32>,
         issuer: Address,
+        validity_period: u64,
     ) {
         issuer.require_auth();
         if !env.storage().instance().has(&trusted_key(&issuer)) {
@@ -54,12 +56,14 @@ impl EngineerRegistry {
             credential_hash != BytesN::from_array(&env, &[0u8; 32]),
             "credential hash cannot be zero"
         );
+        let now = env.ledger().timestamp();
         let record = Engineer {
             address: engineer.clone(),
             credential_hash,
             issuer: issuer.clone(),
             active: true,
-            issued_at: env.ledger().timestamp(),
+            issued_at: now,
+            expires_at: now + validity_period,
         };
         env.storage()
             .persistent()
@@ -84,7 +88,7 @@ impl EngineerRegistry {
         env.storage()
             .persistent()
             .get::<_, Engineer>(&engineer_key(&engineer))
-            .map(|e| e.active)
+            .map(|e| e.active && env.ledger().timestamp() < e.expires_at)
             .unwrap_or(false)
     }
 
@@ -175,7 +179,7 @@ impl EngineerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::storage::Persistent, BytesN, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::storage::Persistent, testutils::Ledger, BytesN, Env};
 
     fn setup<'a>(env: &'a Env) -> (EngineerRegistryClient<'a>, Address) {
         let contract_id = env.register(EngineerRegistry, ());
@@ -196,7 +200,7 @@ mod tests {
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&engineer, &hash, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
         assert!(client.verify_engineer(&engineer));
 
         client.revoke_credential(&engineer);
@@ -215,7 +219,7 @@ mod tests {
         let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&engineer, &zero_hash, &issuer);
+        client.register_engineer(&engineer, &zero_hash, &issuer, &31_536_000);
     }
 
     #[test]
@@ -229,7 +233,7 @@ mod tests {
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&engineer, &hash, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
 
         let contract_id = client.address.clone();
         let ttl = env.as_contract(&contract_id, || {
@@ -271,7 +275,7 @@ mod tests {
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&engineer, &hash, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
         client.revoke_credential(&engineer);
 
         let contract_id = client.address.clone();
@@ -335,7 +339,7 @@ mod tests {
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&engineer, &hash, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
 
         let list = client.get_engineers_by_issuer(&issuer);
         assert_eq!(list.len(), 1);
@@ -354,9 +358,9 @@ mod tests {
         let e3 = Address::generate(&env);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer);
-        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer);
-        client.register_engineer(&e3, &BytesN::from_array(&env, &[3u8; 32]), &issuer);
+        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer, &31_536_000);
+        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer, &31_536_000);
+        client.register_engineer(&e3, &BytesN::from_array(&env, &[3u8; 32]), &issuer, &31_536_000);
 
         let list = client.get_engineers_by_issuer(&issuer);
         assert_eq!(list.len(), 3);
@@ -375,8 +379,8 @@ mod tests {
 
         client.add_trusted_issuer(&admin, &issuer_a);
         client.add_trusted_issuer(&admin, &issuer_b);
-        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer_a);
-        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer_b);
+        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer_a, &31_536_000);
+        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer_b, &31_536_000);
 
         assert_eq!(client.get_engineers_by_issuer(&issuer_a).len(), 1);
         assert_eq!(client.get_engineers_by_issuer(&issuer_b).len(), 1);
@@ -396,6 +400,64 @@ mod tests {
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         // untrusted_issuer was never added via add_trusted_issuer — must panic
-        client.register_engineer(&engineer, &hash, &untrusted_issuer);
+        client.register_engineer(&engineer, &hash, &untrusted_issuer, &31_536_000);
+    }
+
+    #[test]
+    fn test_expired_credential_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        // validity_period of 1000 seconds
+        client.register_engineer(&engineer, &hash, &issuer, &1000);
+        assert!(client.verify_engineer(&engineer));
+
+        // Advance ledger past expiry
+        env.ledger().with_mut(|li| li.timestamp = li.timestamp + 1001);
+        assert!(!client.verify_engineer(&engineer));
+    }
+
+    #[test]
+    fn test_credential_valid_before_expiry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &1000);
+
+        // Advance to just before expiry
+        env.ledger().with_mut(|li| li.timestamp = li.timestamp + 999);
+        assert!(client.verify_engineer(&engineer));
+    }
+
+    #[test]
+    fn test_expires_at_stored_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        let validity_period: u64 = 86_400;
+
+        client.add_trusted_issuer(&admin, &issuer);
+        let issued_at = env.ledger().timestamp();
+        client.register_engineer(&engineer, &hash, &issuer, &validity_period);
+
+        let record = client.get_engineer(&engineer);
+        assert_eq!(record.issued_at, issued_at);
+        assert_eq!(record.expires_at, issued_at + validity_period);
     }
 }
