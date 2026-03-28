@@ -483,6 +483,16 @@ impl Lifecycle {
     }
 
     pub fn is_collateral_eligible(env: Env, asset_id: u64) -> bool {
+        // Verify asset exists before checking eligibility
+        let asset_registry: Address = env
+            .storage()
+            .instance()
+            .get(&ASSET_REGISTRY)
+            .expect("asset registry not set");
+        let asset_registry_client =
+            asset_registry::AssetRegistryClient::new(&env, &asset_registry);
+        asset_registry_client.get_asset(&asset_id);
+
         let threshold = 50u32;
         Self::get_collateral_score(env, asset_id) >= threshold
     }
@@ -865,6 +875,23 @@ mod tests {
 
         // Query score for non-existent asset ID
         let result = client.try_get_collateral_score(&999u64);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                asset_registry::ContractError::AssetNotFound as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_is_collateral_eligible_unregistered_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+
+        // Check eligibility for non-existent asset ID
+        let result = client.try_is_collateral_eligible(&999u64);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
