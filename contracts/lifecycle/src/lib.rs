@@ -130,7 +130,7 @@ impl Lifecycle {
             .set(&ENG_REGISTRY, &engineer_registry);
 
         let config = Config {
-            admin,
+            admin: admin.clone(),
             max_history: if max_history == 0 {
                 DEFAULT_MAX_HISTORY
             } else {
@@ -139,6 +139,11 @@ impl Lifecycle {
             score_increment: DEFAULT_SCORE_INCREMENT,
         };
         env.storage().instance().set(&CONFIG, &config);
+
+        env.events().publish(
+            (symbol_short!("INIT"),),
+            (asset_registry, engineer_registry, admin),
+        );
     }
 
     pub fn update_score_increment(env: Env, admin: Address, score_increment: u32) {
@@ -701,6 +706,28 @@ mod tests {
 
         let events = env.events().all();
         assert!(events.len() > 0);
+    }
+
+    #[test]
+    fn test_initialize_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let asset_registry_id = env.register(AssetRegistry, ());
+        let engineer_registry_id = env.register(EngineerRegistry, ());
+        let lifecycle_id = env.register(Lifecycle, ());
+        let admin = Address::generate(&env);
+
+        let lifecycle = LifecycleClient::new(&env, &lifecycle_id);
+        lifecycle.initialize(
+            &asset_registry_id,
+            &engineer_registry_id,
+            &admin,
+            &0u32,
+        );
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
     }
 
     // --- Upgrade tests ---
