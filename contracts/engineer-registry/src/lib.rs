@@ -557,14 +557,14 @@ mod tests {
         client.add_trusted_issuer(&admin, &issuer);
         client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
 
-        // Simulate near-expiry by advancing ledger close to TTL threshold
-        env.ledger().with_mut(|li| li.sequence_number = li.sequence_number + 518399);
-
-        // Keep the contract instance alive after the ledger advance
+        // Extend instance TTL first so it survives the ledger advance
         let contract_id = client.address.clone();
         env.as_contract(&contract_id, || {
-            env.storage().instance().extend_ttl(518400, 518400);
+            env.storage().instance().extend_ttl(1_000_000, 1_000_000);
         });
+
+        // Simulate near-expiry of the persistent engineer entry
+        env.ledger().with_mut(|li| li.sequence_number = li.sequence_number + 518399);
 
         client.revoke_credential(&engineer);
 
