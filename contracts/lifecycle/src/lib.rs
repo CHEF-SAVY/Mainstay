@@ -254,6 +254,9 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .set(&history_key(asset_id), &history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&history_key(asset_id), 518400, 518400);
 
         // Update collateral score
         let score: u32 = env
@@ -266,6 +269,9 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .set(&score_key(asset_id), &new_score);
+        env.storage()
+            .persistent()
+            .extend_ttl(&score_key(asset_id), 518400, 518400);
 
         // Append (timestamp, score) snapshot to score history
         let mut score_history: Vec<ScoreEntry> = env
@@ -280,11 +286,17 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .set(&score_history_key(asset_id), &score_history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&score_history_key(asset_id), 518400, 518400);
 
         // Update last maintenance timestamp for decay tracking
         env.storage()
             .persistent()
             .set(&last_update_key(asset_id), &timestamp);
+        env.storage()
+            .persistent()
+            .extend_ttl(&last_update_key(asset_id), 518400, 518400);
 
         // Emit maintenance submission event
         env.events().publish(
@@ -368,9 +380,13 @@ impl Lifecycle {
         }
 
         env.storage().persistent().set(&history_key(asset_id), &history);
+        env.storage().persistent().extend_ttl(&history_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&score_key(asset_id), &score);
+        env.storage().persistent().extend_ttl(&score_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&score_history_key(asset_id), &score_history);
+        env.storage().persistent().extend_ttl(&score_history_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&last_update_key(asset_id), &timestamp);
+        env.storage().persistent().extend_ttl(&last_update_key(asset_id), 518400, 518400);
     }
 
     /// Apply time-based decay to an asset's collateral score.
@@ -413,7 +429,13 @@ impl Lifecycle {
             .set(&score_key(asset_id), &new_score);
         env.storage()
             .persistent()
+            .extend_ttl(&score_key(asset_id), 518400, 518400);
+        env.storage()
+            .persistent()
             .set(&last_update_key(asset_id), &current_time);
+        env.storage()
+            .persistent()
+            .extend_ttl(&last_update_key(asset_id), 518400, 518400);
 
         env.events().publish(
             (symbol_short!("DECAY"), asset_id),
@@ -628,6 +650,7 @@ impl Lifecycle {
         }
 
         env.storage().persistent().set(&score_key(asset_id), &0u32);
+        env.storage().persistent().extend_ttl(&score_key(asset_id), 518400, 518400);
 
         env.events().publish(
             (symbol_short!("RST_SCR"), asset_id),
