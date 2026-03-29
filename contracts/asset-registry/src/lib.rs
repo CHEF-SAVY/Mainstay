@@ -66,6 +66,9 @@ fn owner_index_add(env: &Env, owner: &Address, asset_id: u64) {
 /// Remove an asset ID from the owner's index.
 fn owner_index_remove(env: &Env, owner: &Address, asset_id: u64) {
     let key = owner_index_key(owner);
+    if !env.storage().persistent().has(&key) {
+        return;
+    }
     let ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env));
     let mut updated: Vec<u64> = Vec::new(env);
     for id in ids.iter() {
@@ -218,9 +221,11 @@ impl AssetRegistry {
 
         // Store new dedup key and updated asset
         env.storage().persistent().set(&new_dk, &asset_id);
+        env.storage().persistent().extend_ttl(&new_dk, 518400, 518400);
         asset.metadata = new_metadata.clone();
         asset.metadata_updated_at = env.ledger().timestamp();
         env.storage().persistent().set(&asset_key(asset_id), &asset);
+        env.storage().persistent().extend_ttl(&asset_key(asset_id), 518400, 518400);
 
         env.events().publish(
             (symbol_short!("UPD_META"), asset_id),
@@ -248,6 +253,7 @@ impl AssetRegistry {
             .into();
         env.storage().persistent().remove(&dedup_key(&current_owner, &hash));
         env.storage().persistent().set(&dedup_key(&new_owner, &hash), &asset_id);
+        env.storage().persistent().extend_ttl(&dedup_key(&new_owner, &hash), 518400, 518400);
 
         // Move owner index entry
         owner_index_remove(&env, &current_owner, asset_id);
@@ -881,4 +887,97 @@ mod tests {
             ))),
         );
     }
+
+    #[test]
+    fn test_deregister_asset_with_expired_owner_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        // Simulate owner index expiration by removing it
+        env.as_contract(&contract_id, || {
+            let key = owner_index_key(&owner);
+            env.storage().persistent().remove(&key);
+        });
+
+        // Deregister should not create a stale empty entry
+        client.deregister_asset(&id);
+
+        // Verify owner index was not recreated
+        env.as_contract(&contract_id, || {
+            let key = owner_index_key(&owner);
+            assert!(!env.storage().persistent().has(&key));
+        });
+    }
+
+    #[test]
+    fn test_transfer_asset_extends_new_owner_dedup_key_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let metadata = String::from_str(&env, "CAT-3516");
+        let id = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner);
+
+        client.transfer_asset(&id, &owner, &new_owner);
+
+        // Verify new owner's dedup key TTL is extended
+        env.as_contract(&contract_id, || {
+            let meta_bytes = Bytes::from(metadata.to_xdr(&env));
+            let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
+            let new_dk = dedup_key(&new_owner, &meta_hash);
+            let dedup_ttl = env.storage().persistent().get_ttl(&new_dk);
+            assert!(dedup_ttl > 0, "New owner's dedup key TTL should be extended");
+        });
+    }
+
+    #[test]
+    fn test_update_metadata_extends_new_dedup_key_and_asset_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "Original spec"),
+            &owner,
+        );
+
+        client.update_asset_metadata(
+            &id,
+            &owner,
+            &String::from_str(&env, "Updated spec"),
+        );
+
+        // Verify new dedup key TTL is extended
+        env.as_contract(&contract_id, || {
+            let new_metadata = String::from_str(&env, "Updated spec");
+            let meta_bytes = Bytes::from(new_metadata.to_xdr(&env));
+            let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
+            let new_dk = dedup_key(&owner, &meta_hash);
+            let dedup_ttl = env.storage().persistent().get_ttl(&new_dk);
+            assert!(dedup_ttl > 0, "New dedup key TTL should be extended");
+
+            // Verify asset record TTL is extended
+            let asset_ttl = env.storage().persistent().get_ttl(&asset_key(id));
+            assert!(asset_ttl > 0, "Asset record TTL should be extended");
+        });
+    }
+}
 }
