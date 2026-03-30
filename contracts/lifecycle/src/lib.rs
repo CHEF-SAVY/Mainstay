@@ -1239,6 +1239,7 @@ mod tests {
         assert_eq!(empty_history.len(), 0);
     }
 
+    #[test]
     fn test_get_last_service_no_history() {
         let env = Env::default();
         env.mock_all_auths();
