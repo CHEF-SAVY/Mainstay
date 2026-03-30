@@ -3184,6 +3184,11 @@ for _ in 0..3 {
 
         client.pause(&admin);
 
+        // Read-only access should still work while paused
+        let score = client.get_collateral_score(&asset_id);
+        assert_eq!(score, 0);
+        assert_eq!(client.try_get_collateral_score(&asset_id), Ok(0));
+
         // submit_maintenance
         assert_eq!(
             client.try_submit_maintenance(&asset_id, &symbol_short!("OIL_CHG"), &String::from_str(&env, ""), &engineer),

@@ -1566,6 +1566,14 @@ mod tests {
 
         client.pause(&admin);
 
+        // Read-only access should still work while paused
+        let paused_asset = client.get_asset(&id);
+        assert_eq!(paused_asset.asset_id, id);
+        assert_eq!(paused_asset.owner, owner);
+        assert!(client.asset_exists(&id));
+        assert_eq!(client.get_assets_by_owner(&owner).len(), 1);
+        assert!(client.try_get_asset(&id).is_ok());
+
         // register_asset
         assert_eq!(
             client.try_register_asset(&symbol_short!("GENSET"), &String::from_str(&env, "A"), &owner),

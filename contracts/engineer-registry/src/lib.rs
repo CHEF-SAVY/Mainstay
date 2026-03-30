@@ -1092,6 +1092,13 @@ mod tests {
 
         client.pause(&admin);
 
+        // Read-only access should still work while paused
+        assert!(client.verify_engineer(&engineer));
+        let fetched_engineer = client.get_engineer(&engineer);
+        assert_eq!(fetched_engineer.address, engineer);
+        assert!(fetched_engineer.active);
+        assert!(client.try_get_engineer(&engineer).is_ok());
+
         // register_engineer
         assert_eq!(
             client.try_register_engineer(&Address::generate(&env), &hash, &issuer, &100),
