@@ -13,13 +13,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo test --workspace
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      - name: Audit Dependencies
-      run: cargo audit
-      if: failure()
-        run: echo "::error::Dependency vulnerabilities detected. Please review and update dependencies."
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build WASM
+        run: cargo build --target wasm32-unknown-unknown --workspace
+
+      - name: Audit dependencies
+        run: cargo audit
