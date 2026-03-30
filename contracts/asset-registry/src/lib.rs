@@ -214,6 +214,11 @@ impl AssetRegistry {
             ids.push_back(id);
         }
 
+        // Ensure owner index TTL is extended after all batch writes
+        if !ids.is_empty() {
+            env.storage().persistent().extend_ttl(&owner_index_key(&owner), 518400, 518400);
+        }
+
         ids
     }
 
@@ -323,6 +328,11 @@ impl AssetRegistry {
     /// # Arguments
     /// * `asset_id` - The unique identifier of the asset to deregister
     ///
+    /// # Behavior
+    /// If the dedup key has already expired from storage, the remove operation
+    /// is a no-op. This allows the same owner to re-register the same metadata
+    /// after the dedup key has naturally expired.
+    ///
     /// # Panics
     /// - [`ContractError::AssetNotFound`] if no asset exists with the given ID
     /// - [`ContractError::UnauthorizedAdmin`] if caller is not the admin
@@ -338,7 +348,7 @@ impl AssetRegistry {
         // Remove asset storage
         env.storage().persistent().remove(&asset_key(asset_id));
         
-        // Remove deduplication key
+        // Remove deduplication key (no-op if already expired)
         let dk = dedup_key(&asset.owner, &env.crypto().sha256(&Bytes::from(asset.metadata.to_xdr(&env))).into());
         env.storage().persistent().remove(&dk);
 
@@ -1100,6 +1110,30 @@ mod tests {
         assert_eq!(client.get_assets_by_owner(&owner).len(), 0);
     }
 
+    #[test]
+    fn test_deregister_allows_reregistration_of_same_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let owner = Address::generate(&env);
+        let metadata = String::from_str(&env, "CAT-3516");
+        
+        // Register asset
+        let id1 = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner);
+        
+        // Deregister removes dedup key
+        client.deregister_asset(&id1);
+        
+        // Same owner can now re-register the same metadata
+        let id2 = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner);
+        assert_ne!(id1, id2);
+    }
+
     // --- Issue #142: get_admin structured error before initialization ---
 
     #[test]
@@ -1330,5 +1364,46 @@ mod tests {
                 ContractError::DuplicateAsset as u32,
             ))),
         );
+    }
+
+    #[test]
+    fn test_batch_register_assets_extends_all_ttls() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let mut batch = Vec::new(&env);
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "Asset A") });
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "Asset B") });
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "Asset C") });
+
+        let ids = client.batch_register_assets(&owner, &batch);
+        assert_eq!(ids.len(), 3);
+
+        // Verify all asset keys have TTL extended
+        env.as_contract(&contract_id, || {
+            for id in ids.iter() {
+                let asset_ttl = env.storage().persistent().get_ttl(&asset_key(id));
+                assert!(asset_ttl > 0, "Asset {} TTL should be extended", id);
+            }
+        });
+
+        // Verify all dedup keys have TTL extended
+        env.as_contract(&contract_id, || {
+            for asset_in in batch.iter() {
+                let meta_bytes = Bytes::from(asset_in.metadata.to_xdr(&env));
+                let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
+                let dedup_ttl = env.storage().persistent().get_ttl(&dedup_key(&owner, &meta_hash));
+                assert!(dedup_ttl > 0, "Dedup key TTL should be extended");
+            }
+        });
+
+        // Verify owner index TTL is extended
+        env.as_contract(&contract_id, || {
+            let owner_ttl = env.storage().persistent().get_ttl(&owner_index_key(&owner));
+            assert!(owner_ttl > 0, "Owner index TTL should be extended");
+        });
     }
 }
