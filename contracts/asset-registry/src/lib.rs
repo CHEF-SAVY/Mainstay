@@ -1311,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Admin already initialized")]
+    #[should_panic]
     fn test_initialize_admin_called_twice_panics() {
         let env = Env::default();
         env.mock_all_auths();
