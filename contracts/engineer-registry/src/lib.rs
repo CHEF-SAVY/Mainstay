@@ -13,6 +13,7 @@ pub enum ContractError {
     UntrustedIssuer = 6,
     InvalidCredentialHash = 7,
     Paused = 8,
+    EngineerAlreadyRegistered = 9,
 }
 
 #[contracttype]
@@ -75,6 +76,7 @@ impl EngineerRegistry {
     /// # Panics
     /// - [`ContractError::UntrustedIssuer`] if the issuer is not in the trusted list
     /// - [`ContractError::InvalidCredentialHash`] if credential hash is all zeros
+    /// - [`ContractError::EngineerAlreadyRegistered`] if an active engineer record already exists
     pub fn register_engineer(
         env: Env,
         engineer: Address,
@@ -90,6 +92,14 @@ impl EngineerRegistry {
         if credential_hash == BytesN::from_array(&env, &[0u8; 32]) {
             panic_with_error!(&env, ContractError::InvalidCredentialHash);
         }
+        
+        // Check if engineer already has an active record
+        if let Some(existing) = env.storage().persistent().get::<_, Engineer>(&engineer_key(&engineer)) {
+            if existing.active {
+                panic_with_error!(&env, ContractError::EngineerAlreadyRegistered);
+            }
+        }
+        
         let now = env.ledger().timestamp();
         let record = Engineer {
             address: engineer.clone(),
@@ -148,6 +158,10 @@ impl EngineerRegistry {
     ///
     /// # Arguments
     /// * `engineer` - The address of the engineer whose credentials should be revoked
+    ///
+    /// # Authorization
+    /// Requires signature from the original issuer stored in the engineer's record.
+    /// A different trusted issuer cannot revoke another issuer's engineer.
     ///
     /// # Panics
     /// - [`ContractError::EngineerNotFound`] if no engineer exists with the given address
@@ -905,5 +919,96 @@ mod tests {
             client.try_upgrade(&admin, &BytesN::from_array(&env, &[0u8; 32])),
             Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
         );
+    }
+
+    #[test]
+    fn test_different_issuer_cannot_revoke_another_issuers_engineer() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer_a = Address::generate(&env);
+        let issuer_b = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        // Add both issuers as trusted
+        client.add_trusted_issuer(&admin, &issuer_a);
+        client.add_trusted_issuer(&admin, &issuer_b);
+
+        // Issuer A registers the engineer
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &issuer_a,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "register_engineer",
+                args: (engineer.clone(), hash.clone(), issuer_a.clone(), 31_536_000u64).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.register_engineer(&engineer, &hash, &issuer_a, &31_536_000);
+
+        // Issuer B attempts to revoke (should fail without mock_all_auths)
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &issuer_b,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "revoke_credential",
+                args: (engineer.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        
+        // This should panic because issuer_b is not the original issuer
+        // The require_auth will fail because record.issuer is issuer_a, not issuer_b
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.revoke_credential(&engineer);
+        }));
+        assert!(result.is_err(), "Different issuer should not be able to revoke");
+    }
+
+    #[test]
+    fn test_register_engineer_rejects_active_duplicate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+
+        // Attempt to re-register the same engineer
+        let result = client.try_register_engineer(&engineer, &hash, &issuer, &31_536_000);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::EngineerAlreadyRegistered as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_register_engineer_allows_reregistration_after_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+        
+        // Revoke the credential
+        client.revoke_credential(&engineer);
+        assert!(!client.verify_engineer(&engineer));
+
+        // Should be able to re-register after revocation
+        let new_hash = BytesN::from_array(&env, &[2u8; 32]);
+        client.register_engineer(&engineer, &new_hash, &issuer, &31_536_000);
+        assert!(client.verify_engineer(&engineer));
     }
 }
