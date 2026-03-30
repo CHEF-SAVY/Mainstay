@@ -2,11 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
+    name: Test Workspace
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,9 +18,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo test --workspace
+      - name: Run workspace tests
+        run: cargo test --workspace
 
-      - name: Audit Dependencies
-      run: cargo audit
-      if: failure()
-        run: echo "::error::Dependency vulnerabilities detected. Please review and update dependencies."
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies
+        run: cargo audit

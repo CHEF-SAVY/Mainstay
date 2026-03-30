@@ -1,16 +1,26 @@
-/target
+# Build artifacts
+target/
 
-# Test snapshots
-**/test_snapshots/
-
-# Environment files
+# Environment secrets
 .env
 
-# OS/editor
-.DS_Store
-Thumbs.db
+# Test snapshots
+contracts/asset-registry/test_snapshots/
+contracts/lifecycle/test_snapshots/
+contracts/engineer-registry/test_snapshots/
+**/*.snap
+
+# IDE / editor
 .vscode/
 .idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Logs
 *.log
+
+# Wasm build output
+*.wasm
