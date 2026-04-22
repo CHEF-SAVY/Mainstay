@@ -93,7 +93,20 @@ fn engineer_history_add(env: &Env, engineer: &Address, asset_id: u64) {
         .persistent()
         .get(&key)
         .unwrap_or_else(|| Vec::new(env));
-    ids.push_back(asset_id);
+    
+    // Check if asset_id already exists before appending
+    let mut found = false;
+    for id in ids.iter() {
+        if id == asset_id {
+            found = true;
+            break;
+        }
+    }
+    
+    if !found {
+        ids.push_back(asset_id);
+    }
+    
     env.storage().persistent().set(&key, &ids);
     env.storage().persistent().extend_ttl(&key, 518400, 518400);
 }
@@ -2637,5 +2650,25 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert!(history.contains(&asset1));
         assert!(history.contains(&asset2));
+    }
+
+    #[test]
+    fn test_engineer_history_deduplication() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Submit multiple maintenance records for the same asset
+        client.submit_maintenance(&asset, &symbol_short!("OIL_CHG"), &String::from_str(&env, "First"), &engineer);
+        env.ledger().with_mut(|li| li.timestamp += 3600);
+        client.submit_maintenance(&asset, &symbol_short!("INSPECT"), &String::from_str(&env, "Second"), &engineer);
+
+        let history = client.get_engineer_maintenance_history(&engineer);
+        // Asset should appear only once despite multiple maintenance records
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap(), asset);
     }
 }
