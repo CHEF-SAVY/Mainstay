@@ -174,7 +174,7 @@ fn apply_decay(
 
     let config: Config = env
         .storage()
-        .instance()
+        .persistent()
         .get(&CONFIG)
         .unwrap_or_else(|| panic_with_error!(env, ContractError::NotInitialized));
 
@@ -298,7 +298,7 @@ impl Lifecycle {
         admin: Address,
         max_history: u32,
     ) {
-        if env.storage().instance().has(&CONFIG) {
+        if env.storage().persistent().has(&CONFIG) {
             panic_with_error!(&env, ContractError::AlreadyInitialized);
         }
         if asset_registry == engineer_registry {
@@ -325,7 +325,8 @@ impl Lifecycle {
             eligibility_threshold: DEFAULT_ELIGIBILITY_THRESHOLD,
             max_notes_length: DEFAULT_MAX_NOTES_LENGTH,
         };
-        env.storage().instance().set(&CONFIG, &config);
+        env.storage().persistent().set(&CONFIG, &config);
+        env.storage().persistent().extend_ttl(&CONFIG, 518400, 518400);
 
         env.events()
             .publish((EVENT_INIT,), (asset_registry, engineer_registry, admin));
@@ -343,7 +344,7 @@ impl Lifecycle {
         admin.require_auth();
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -364,7 +365,7 @@ impl Lifecycle {
         admin.require_auth();
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -396,7 +397,7 @@ impl Lifecycle {
         admin.require_auth();
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -424,11 +425,12 @@ impl Lifecycle {
 
         let mut config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         config.admin = pending_admin;
-        env.storage().instance().set(&CONFIG, &config);
+        env.storage().persistent().set(&CONFIG, &config);
+        env.storage().persistent().extend_ttl(&CONFIG, 518400, 518400);
         env.storage().instance().remove(&PENDING_ADMIN_KEY);
     }
 
@@ -453,7 +455,7 @@ impl Lifecycle {
 
         let mut config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -461,7 +463,8 @@ impl Lifecycle {
         }
 
         config.score_increment = score_increment;
-        env.storage().instance().set(&CONFIG, &config);
+        env.storage().persistent().set(&CONFIG, &config);
+        env.storage().persistent().extend_ttl(&CONFIG, 518400, 518400);
     }
 
     /// Admin-only function to update the decay rate and interval for collateral score decay.
@@ -486,7 +489,7 @@ impl Lifecycle {
 
         let mut config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -495,7 +498,8 @@ impl Lifecycle {
 
         config.decay_rate = decay_rate;
         config.decay_interval = decay_interval;
-        env.storage().instance().set(&CONFIG, &config);
+        env.storage().persistent().set(&CONFIG, &config);
+        env.storage().persistent().extend_ttl(&CONFIG, 518400, 518400);
     }
 
     /// Admin-only function to update the eligibility threshold for collateral scoring.
@@ -514,7 +518,7 @@ impl Lifecycle {
 
         let mut config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -522,7 +526,8 @@ impl Lifecycle {
         }
 
         config.eligibility_threshold = threshold;
-        env.storage().instance().set(&CONFIG, &config);
+        env.storage().persistent().set(&CONFIG, &config);
+        env.storage().persistent().extend_ttl(&CONFIG, 518400, 518400);
     }
 
     /// Admin-only function to update the maximum history records per asset.
@@ -552,7 +557,7 @@ impl Lifecycle {
 
         let mut config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -560,7 +565,8 @@ impl Lifecycle {
         }
 
         config.max_history = new_max;
-        env.storage().instance().set(&CONFIG, &config);
+        env.storage().persistent().set(&CONFIG, &config);
+        env.storage().persistent().extend_ttl(&CONFIG, 518400, 518400);
 
         env.events()
             .publish((symbol_short!("UPD_MAX"), admin), new_max);
@@ -592,7 +598,7 @@ impl Lifecycle {
 
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
@@ -711,7 +717,7 @@ impl Lifecycle {
 
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
@@ -821,7 +827,7 @@ impl Lifecycle {
         ensure_not_paused(&env);
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         apply_decay(&env, asset_id, true, true, config.max_history)
@@ -949,7 +955,7 @@ impl Lifecycle {
         verify_asset_exists(&env, &asset_registry, &asset_id);
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         apply_decay(&env, asset_id, false, false, config.max_history)
@@ -1029,7 +1035,7 @@ impl Lifecycle {
 
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
@@ -1117,7 +1123,7 @@ impl Lifecycle {
 
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -1160,7 +1166,7 @@ impl Lifecycle {
 
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -1182,7 +1188,7 @@ impl Lifecycle {
     /// - [`ContractError::NotInitialized`] if contract has not been initialized
     pub fn get_config(env: Env) -> Config {
         env.storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
     }
@@ -1203,7 +1209,7 @@ impl Lifecycle {
 
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -1235,7 +1241,7 @@ impl Lifecycle {
 
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -1290,7 +1296,7 @@ impl Lifecycle {
 
         let config: Config = env
             .storage()
-            .instance()
+            .persistent()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if config.admin != admin {
@@ -4216,5 +4222,22 @@ mod tests {
         assert_eq!(lifecycle.get_collateral_score(&asset_id), 50);
         assert!(lifecycle.is_collateral_eligible(&asset_id));
         assert_eq!(lifecycle.get_last_service(&asset_id).engineer, engineer);
+    }
+
+    #[test]
+    fn test_config_survives_ttl_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, admin) = setup(&env, 0);
+
+        // Advance ledger past the default instance TTL (typically ~1 day in ledgers)
+        // to simulate what would happen if only instance storage were used.
+        env.ledger().set_sequence_number(518_401);
+
+        // Config must still be readable and hold the updated value.
+        client.update_score_increment(&admin, &10);
+        let config = client.get_config();
+        assert_eq!(config.score_increment, 10);
     }
 }
