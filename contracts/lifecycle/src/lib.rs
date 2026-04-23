@@ -120,7 +120,20 @@ fn engineer_history_add(env: &Env, engineer: &Address, asset_id: u64) {
         .persistent()
         .get(&key)
         .unwrap_or_else(|| Vec::new(env));
-    ids.push_back(asset_id);
+    
+    // Check if asset_id already exists before appending
+    let mut found = false;
+    for id in ids.iter() {
+        if id == asset_id {
+            found = true;
+            break;
+        }
+    }
+    
+    if !found {
+        ids.push_back(asset_id);
+    }
+    
     env.storage().persistent().set(&key, &ids);
     env.storage().persistent().extend_ttl(&key, 518400, 518400);
 }
@@ -416,7 +429,7 @@ impl Lifecycle {
         ensure_not_paused(&env);
         admin.require_auth();
 
-        if decay_interval == 0 {
+        if decay_rate == 0 || decay_interval == 0 {
             panic_with_error!(&env, ContractError::InvalidConfig);
         }
 
@@ -1684,6 +1697,21 @@ mod tests {
 
         let (client, _, _, admin) = setup(&env, 0);
         let result = client.try_update_decay_config(&admin, &10, &0);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidConfig as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_update_decay_config_zero_rate_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, admin) = setup(&env, 0);
+        let result = client.try_update_decay_config(&admin, &0, &2592000);
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
@@ -3462,6 +3490,7 @@ mod tests {
 
         let score_key = (symbol_short!("SCORE"), asset_id);
         let last_update_key = (symbol_short!("LUPD"), asset_id);
+        let score_history_key = (symbol_short!("SCHIST"), asset_id);
 
         let contract_id = client.address.clone();
 
@@ -3469,6 +3498,7 @@ mod tests {
         env.as_contract(&contract_id, || {
             assert!(env.storage().persistent().has(&score_key));
             assert!(env.storage().persistent().has(&last_update_key));
+            assert!(env.storage().persistent().has(&score_history_key));
         });
 
         // Call decay_score
@@ -3478,6 +3508,7 @@ mod tests {
         env.as_contract(&contract_id, || {
             assert!(env.storage().persistent().has(&score_key));
             assert!(env.storage().persistent().has(&last_update_key));
+            assert!(env.storage().persistent().has(&score_history_key));
         });
     }
 
