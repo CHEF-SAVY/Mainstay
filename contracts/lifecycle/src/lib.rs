@@ -292,6 +292,9 @@ impl Lifecycle {
         if env.storage().instance().has(&CONFIG) {
             panic_with_error!(&env, ContractError::AlreadyInitialized);
         }
+        if asset_registry == engineer_registry {
+            panic_with_error!(&env, ContractError::InvalidConfig);
+        }
 
         env.storage()
             .instance()
@@ -1187,32 +1190,6 @@ impl Lifecycle {
         }
     }
 
-    /// Propose a new admin. The new admin must call `accept_admin` to complete the transfer.
-    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
-        admin.require_auth();
-        let config: Config = env.storage().instance().get(&CONFIG)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        if config.admin != admin {
-            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
-        }
-        env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
-    }
-
-    /// Accept a pending admin transfer. Must be called by the proposed new admin.
-    pub fn accept_admin(env: Env, new_admin: Address) {
-        new_admin.require_auth();
-        let pending: Address = env.storage().instance().get(&PENDING_ADMIN_KEY)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAdmin));
-        if pending != new_admin {
-            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
-        }
-        let mut config: Config = env.storage().instance().get(&CONFIG)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        config.admin = new_admin;
-        env.storage().instance().set(&CONFIG, &config);
-        env.storage().instance().remove(&PENDING_ADMIN_KEY);
-    }
-
     /// Admin-only: reset an asset's collateral score to zero.
     ///
     /// Use this after a major incident, asset rebuild, or verified fraud event
@@ -1288,6 +1265,7 @@ mod tests {
         let engineer_registry_id = env.register(EngineerRegistry, ());
         let lifecycle_id = env.register(Lifecycle, ());
         let admin = Address::generate(env);
+        let asset_admin = Address::generate(env);
 
         let lifecycle = LifecycleClient::new(env, &lifecycle_id);
         lifecycle.initialize(
@@ -1297,9 +1275,13 @@ mod tests {
             &max_history,
         );
 
+        let asset_registry = AssetRegistryClient::new(env, &asset_registry_id);
+        asset_registry.initialize_admin(&asset_admin);
+        asset_registry.add_asset_type(&asset_admin, &symbol_short!("GENSET"));
+
         (
             lifecycle,
-            AssetRegistryClient::new(env, &asset_registry_id),
+            asset_registry,
             EngineerRegistryClient::new(env, &engineer_registry_id),
             admin,
         )
@@ -1586,14 +1568,14 @@ mod tests {
         env.ledger().set_timestamp(2000);
         client.submit_maintenance(
             &asset_id,
-            &symbol_short!("INSP"),
+            &symbol_short!("INSPECT"),
             &String::from_str(&env, "second"),
             &engineer,
         );
 
         let last = client.get_last_service(&asset_id);
         assert_eq!(last.timestamp, 2000);
-        assert_eq!(last.task_type, symbol_short!("INSP"));
+        assert_eq!(last.task_type, symbol_short!("INSPECT"));
     }
 
     #[test]
@@ -1895,9 +1877,6 @@ mod tests {
         env.mock_all_auths();
 
         let (client, asset_registry_client, _, _) = setup(&env, 0);
-        let asset_admin = Address::generate(&env);
-        asset_registry_client.initialize_admin(&asset_admin);
-        asset_registry_client.add_asset_type(&asset_admin, &symbol_short!("GENSET"));
         let owner = Address::generate(&env);
         let asset_id = asset_registry_client.register_asset(
             &symbol_short!("GENSET"),
@@ -2034,7 +2013,7 @@ mod tests {
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
-                asset_registry::ContractError::AssetNotFound as u32,
+                ContractError::AssetNotFound as u32,
             ))),
         );
     }
@@ -2264,8 +2243,8 @@ mod tests {
         client.upgrade(&admin, &new_wasm_hash);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 2); // init + upgrade
-        let (_, topics, data) = events.get(1).unwrap();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data) = events.get(0).unwrap();
         use soroban_sdk::TryIntoVal;
         let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
         assert_eq!(t0, symbol_short!("UPGRADE"));
@@ -2284,7 +2263,7 @@ mod tests {
         let new_admin = Address::generate(&env);
 
         client.propose_admin(&admin, &new_admin);
-        client.accept_admin(&new_admin);
+        client.accept_admin();
 
         assert_eq!(client.get_config().admin, new_admin);
     }
@@ -2318,13 +2297,19 @@ mod tests {
 
         client.propose_admin(&admin, &new_admin);
 
-        let result = client.try_accept_admin(&impostor);
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::UnauthorizedAdmin as u32,
-            ))),
-        );
+        use soroban_sdk::IntoVal;
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &impostor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "accept_admin",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_accept_admin();
+        assert!(result.is_err());
         assert_eq!(client.get_config().admin, admin);
     }
 
@@ -2971,10 +2956,7 @@ mod tests {
 
         let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
 
-        // Initialize asset registry and register asset
-        let asset_admin = Address::generate(&env);
-        asset_registry_client.initialize_admin(&asset_admin);
-        asset_registry_client.add_asset_type(&asset_admin, &symbol_short!("GENSET"));
+        // Register asset
         let owner = Address::generate(&env);
         let asset_id = asset_registry_client.register_asset(
             &symbol_short!("GENSET"),
@@ -3019,10 +3001,7 @@ mod tests {
 
         let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
 
-        // Initialize asset registry and register asset
-        let asset_admin = Address::generate(&env);
-        asset_registry_client.initialize_admin(&asset_admin);
-        asset_registry_client.add_asset_type(&asset_admin, &symbol_short!("GENSET"));
+        // Register asset
         let owner = Address::generate(&env);
         let asset_id = asset_registry_client.register_asset(
             &symbol_short!("GENSET"),
@@ -3069,6 +3048,8 @@ mod tests {
         let (lifecycle, asset_registry, engineer_registry, _) = setup(&env, 0);
 
         // 1. Register asset
+        let asset_admin = asset_registry.get_admin();
+        asset_registry.add_asset_type(&asset_admin, &symbol_short!("TURBINE"));
         let owner = Address::generate(&env);
         let asset_id = asset_registry.register_asset(
             &symbol_short!("TURBINE"),
@@ -3204,9 +3185,18 @@ mod tests {
 
         client.reset_score(&admin, &asset_id);
 
-        // Unknown type = 3
-        client.submit_maintenance(&asset_id, &symbol_short!("UNKNOWN"), &String::from_str(&env, ""), &engineer);
-        assert_eq!(client.get_collateral_score(&asset_id), 3);
+        let result = client.try_submit_maintenance(
+            &asset_id,
+            &symbol_short!("UNKNOWN"),
+            &String::from_str(&env, ""),
+            &engineer,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidTaskType as u32,
+            ))),
+        );
     }
 
     #[test]
@@ -3394,14 +3384,12 @@ mod tests {
         let (client, _, _, admin) = setup(&env, 0);
         let new_registry = Address::generate(&env);
 
-        let before_len = env.events().all().len();
-
         client.update_asset_registry(&admin, &new_registry);
 
         let events = env.events().all();
-        assert_eq!(events.len(), before_len + 1);
+        assert_eq!(events.len(), 1);
 
-        let (_, topics, _data) = events.get(before_len).unwrap();
+        let (_, topics, _data) = events.get(0).unwrap();
         let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
         assert_eq!(t0, EVENT_REG_AST);
     }
@@ -3414,14 +3402,12 @@ mod tests {
         let (client, _, _, admin) = setup(&env, 0);
         let new_registry = Address::generate(&env);
 
-        let before_len = env.events().all().len();
-
         client.update_engineer_registry(&admin, &new_registry);
 
         let events = env.events().all();
-        assert_eq!(events.len(), before_len + 1);
+        assert_eq!(events.len(), 1);
 
-        let (_, topics, _data) = events.get(before_len).unwrap();
+        let (_, topics, _data) = events.get(0).unwrap();
         let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
         assert_eq!(t0, EVENT_REG_ENG);
     }

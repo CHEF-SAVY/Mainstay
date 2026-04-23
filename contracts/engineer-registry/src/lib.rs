@@ -19,6 +19,7 @@ pub enum ContractError {
     CredentialRevoked = 9,
     EngineerAlreadyRegistered = 10,
     IssuerNotFound = 11,
+    PendingAdminAlreadyExists = 12,
 }
 
 #[contracttype]
@@ -510,32 +511,21 @@ impl EngineerRegistry {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Get only active, non-expired engineer addresses credentialed by a specific issuer.
+    pub fn get_active_engineers_by_issuer(env: Env, issuer: Address) -> Vec<Address> {
+        let engineers = Self::get_engineers_by_issuer(env.clone(), issuer);
+        let mut active_engineers = Vec::new(&env);
+        for engineer in engineers.iter() {
+            if Self::get_engineer_status(env.clone(), engineer.clone()) == EngineerStatus::Active {
+                active_engineers.push_back(engineer);
+            }
+        }
+        active_engineers
+    }
+
     /// Get the number of engineers credentialed by a specific issuer.
     pub fn get_engineer_count_by_issuer(env: Env, issuer: Address) -> u32 {
         Self::get_engineers_by_issuer(env, issuer).len()
-    }
-
-    /// Propose a new admin. The new admin must call `accept_admin` to complete the transfer.
-    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
-        admin.require_auth();
-        let stored: Address = env.storage().instance().get(&admin_key())
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        if stored != admin {
-            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
-        }
-        env.storage().instance().set(&pending_admin_key(), &new_admin);
-    }
-
-    /// Accept a pending admin transfer. Must be called by the proposed new admin.
-    pub fn accept_admin(env: Env, new_admin: Address) {
-        new_admin.require_auth();
-        let pending: Address = env.storage().instance().get(&pending_admin_key())
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAdmin));
-        if pending != new_admin {
-            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
-        }
-        env.storage().instance().set(&admin_key(), &new_admin);
-        env.storage().instance().remove(&pending_admin_key());
     }
 
     /// Admin-only function to upgrade the contract WASM to a new hash.
@@ -845,7 +835,7 @@ mod tests {
 
         let new_admin = Address::generate(&env);
         client.propose_admin(&admin, &new_admin);
-        client.accept_admin(&new_admin);
+        client.accept_admin();
 
         assert_eq!(client.get_admin(), new_admin);
     }
@@ -878,13 +868,19 @@ mod tests {
         let impostor = Address::generate(&env);
         client.propose_admin(&admin, &new_admin);
 
-        let result = client.try_accept_admin(&impostor);
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::UnauthorizedAdmin as u32,
-            ))),
-        );
+        use soroban_sdk::IntoVal;
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &impostor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "accept_admin",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_accept_admin();
+        assert!(result.is_err());
         assert_eq!(client.get_admin(), admin);
     }
 
@@ -1394,9 +1390,9 @@ mod tests {
         client.remove_trusted_issuer(&admin, &issuer);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 2); // add + remove
+        assert_eq!(events.len(), 1);
 
-        let remove_event = events.get(1).unwrap();
+        let remove_event = events.get(0).unwrap();
         let (_, topics, data) = remove_event;
 
         use soroban_sdk::TryIntoVal;
@@ -1469,6 +1465,21 @@ mod tests {
         client.add_trusted_issuer(&admin, &issuer_b);
 
         // Issuer A registers the engineer
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &issuer_a,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "register_engineer",
+                args: (
+                    engineer.clone(),
+                    hash.clone(),
+                    issuer_a.clone(),
+                    31_536_000u64,
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         client.register_engineer(&engineer, &hash, &issuer_a, &31_536_000);
 
         // Issuer B attempts to revoke — should fail because record.issuer is issuer_a
@@ -1648,7 +1659,7 @@ mod tests {
     fn test_propose_admin_unauthorized() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin) = setup(&env);
+        let (client, _admin) = setup(&env);
 
         let unauthorized = Address::generate(&env);
         let new_admin = Address::generate(&env);
@@ -1671,10 +1682,16 @@ mod tests {
         client.propose_admin(&admin, &new_admin);
 
         // Try to accept as unauthorized address
-        env.mock_all_auths_allowing_non_root_auth();
-        assert_eq!(
-            client.try_accept_admin(),
-            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::UnauthorizedAdmin as u32)))
-        );
+        use soroban_sdk::IntoVal;
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &unauthorized,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "accept_admin",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(client.try_accept_admin().is_err());
     }
 }

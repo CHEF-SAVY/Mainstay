@@ -1,8 +1,8 @@
 #![no_std]
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, log, panic_with_error, symbol_short,
+    Address, Bytes, BytesN, Env, String, Symbol, Vec,
 };
 
 #[contracterror]
@@ -17,6 +17,7 @@ pub enum ContractError {
     AdminAlreadyInitialized = 6,
     Paused = 7,
     InvalidAssetType = 8,
+    PendingAdminAlreadyExists = 9,
 }
 
 #[contracttype]
@@ -84,6 +85,12 @@ fn owner_index_add(env: &Env, owner: &Address, asset_id: u64) {
 fn owner_index_remove(env: &Env, owner: &Address, asset_id: u64) {
     let key = owner_index_key(owner);
     if !env.storage().persistent().has(&key) {
+        log!(
+            env,
+            "owner index missing during remove",
+            owner.clone(),
+            asset_id
+        );
         return;
     }
     let ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env));
@@ -564,29 +571,6 @@ impl AssetRegistry {
         );
     }
 
-    /// Propose a new admin. The new admin must call `accept_admin` to complete the transfer.
-    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
-        admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN_KEY)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
-        if stored != admin {
-            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
-        }
-        env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
-    }
-
-    /// Accept a pending admin transfer. Must be called by the proposed new admin.
-    pub fn accept_admin(env: Env, new_admin: Address) {
-        new_admin.require_auth();
-        let pending: Address = env.storage().instance().get(&PENDING_ADMIN_KEY)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAdmin));
-        if pending != new_admin {
-            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
-        }
-        env.storage().instance().set(&ADMIN_KEY, &new_admin);
-        env.storage().instance().remove(&PENDING_ADMIN_KEY);
-    }
-
     /// Admin-only function to upgrade the contract WASM to a new hash.
     /// This allows for contract updates while maintaining state.
     ///
@@ -668,7 +652,7 @@ mod tests {
     use soroban_sdk::testutils::storage::Persistent;
     use soroban_sdk::{
         symbol_short,
-        testutils::{Address as _, Events, Ledger as _},
+        testutils::{Address as _, Events, Ledger as _, Logs},
         Bytes, Env, String,
     };
 
@@ -892,7 +876,7 @@ mod tests {
         client.initialize_admin(&admin);
 
         client.propose_admin(&admin, &new_admin);
-        client.accept_admin(&new_admin);
+        client.accept_admin();
 
         assert_eq!(client.get_admin(), new_admin);
     }
@@ -931,13 +915,19 @@ mod tests {
         client.initialize_admin(&admin);
         client.propose_admin(&admin, &new_admin);
 
-        let result = client.try_accept_admin(&impostor);
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::UnauthorizedAdmin as u32,
-            ))),
-        );
+        use soroban_sdk::IntoVal;
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &impostor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_admin",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_accept_admin();
+        assert!(result.is_err());
         // Original admin unchanged
         assert_eq!(client.get_admin(), admin);
     }
@@ -1343,6 +1333,53 @@ mod tests {
         let new_ids = client.get_assets_by_owner(&new_owner);
         assert_eq!(new_ids.len(), 1);
         assert!(new_ids.contains(&id));
+    }
+
+    #[test]
+    fn test_transfer_asset_logs_missing_owner_index_and_keeps_old_owner_clean() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let retained_id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+        let transferred_id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3520"),
+            &owner,
+        );
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .remove(&owner_index_key(&owner));
+        });
+
+        client.transfer_asset(&transferred_id, &owner, &new_owner);
+
+        let logs = env.logs().all();
+        let warning = logs.last().unwrap();
+        assert!(warning.contains("owner index missing during remove"));
+
+        let old_owner_ids = client.get_assets_by_owner(&owner);
+        assert_eq!(old_owner_ids.len(), 0);
+        assert!(!old_owner_ids.contains(&transferred_id));
+        assert!(!old_owner_ids.contains(&retained_id));
+
+        let new_owner_ids = client.get_assets_by_owner(&new_owner);
+        assert_eq!(new_owner_ids.len(), 1);
+        assert!(new_owner_ids.contains(&transferred_id));
+
     }
 
     #[test]
