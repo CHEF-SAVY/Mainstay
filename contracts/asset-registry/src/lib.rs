@@ -1,8 +1,8 @@
 #![no_std]
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, log, panic_with_error, symbol_short,
+    Address, Bytes, BytesN, Env, String, Symbol, Vec,
 };
 
 #[contracterror]
@@ -15,9 +15,10 @@ pub enum ContractError {
     UnauthorizedOwner = 4,
     NotInitialized = 5,
     AdminAlreadyInitialized = 6,
-    PendingAdminAlreadyExists = 7,
-    Paused = 8,
-    InvalidAssetType = 9,
+    Paused = 7,
+    InvalidAssetType = 8,
+    PendingAdminAlreadyExists = 9,
+>>>>>>> origin/main
 }
 
 #[contracttype]
@@ -85,6 +86,12 @@ fn owner_index_add(env: &Env, owner: &Address, asset_id: u64) {
 fn owner_index_remove(env: &Env, owner: &Address, asset_id: u64) {
     let key = owner_index_key(owner);
     if !env.storage().persistent().has(&key) {
+        log!(
+            env,
+            "owner index missing during remove",
+            owner.clone(),
+            asset_id
+        );
         return;
     }
     let ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env));
@@ -189,6 +196,8 @@ impl AssetRegistry {
         let mut ids: Vec<u64> = Vec::new(&env);
         let mut batch_hashes: Vec<BytesN<32>> = Vec::new(&env);
 
+        let mut next_id: u64 = env.storage().instance().get(&ASSET_COUNT).unwrap_or(0);
+
         for asset_in in assets.iter() {
             if !Self::is_valid_asset_type(env.clone(), asset_in.asset_type.clone()) {
                 panic_with_error!(&env, ContractError::InvalidAssetType);
@@ -207,7 +216,8 @@ impl AssetRegistry {
             }
             batch_hashes.push_back(meta_hash.clone());
 
-            let id: u64 = env.storage().instance().get(&ASSET_COUNT).unwrap_or(0) + 1;
+            next_id += 1;
+            let id = next_id;
             let asset = Asset {
                 asset_id: id,
                 asset_type: asset_in.asset_type.clone(),
@@ -219,7 +229,6 @@ impl AssetRegistry {
 
             env.storage().persistent().set(&asset_key(id), &asset);
             env.storage().persistent().extend_ttl(&asset_key(id), 518400, 518400);
-            env.storage().instance().set(&ASSET_COUNT, &id);
             env.storage().persistent().set(&dedup_key(&owner, &meta_hash), &id);
             env.storage().persistent().extend_ttl(&dedup_key(&owner, &meta_hash), 518400, 518400);
 
@@ -231,6 +240,10 @@ impl AssetRegistry {
             );
 
             ids.push_back(id);
+        }
+
+        if next_id > env.storage().instance().get(&ASSET_COUNT).unwrap_or(0) {
+            env.storage().instance().set(&ASSET_COUNT, &next_id);
         }
 
         // Ensure owner index TTL is extended after all batch writes
@@ -364,6 +377,7 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::PendingAdminAlreadyExists);
         }
         env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
+        env.events().publish((symbol_short!("PROP_ADMIN"),), (admin, new_admin));
     }
 
     /// Accept the admin transfer (step 2 of 2-step transfer).
@@ -436,18 +450,25 @@ impl AssetRegistry {
     ///
     /// # Panics
     /// - [`ContractError::AssetNotFound`] if no asset exists with the given ID
-    /// - [`ContractError::UnauthorizedAdmin`] if caller is not the admin
-    pub fn deregister_asset(env: Env, asset_id: u64) {
+    /// - [`ContractError::UnauthorizedOwner`] if caller is neither the admin nor the asset owner
+    pub fn deregister_asset(env: Env, caller: Address, asset_id: u64) {
         ensure_not_paused(&env);
-        let admin = Self::get_admin(env.clone());
-        admin.require_auth();
 
         let asset: Asset = env
             .storage()
             .persistent()
             .get(&asset_key(asset_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::AssetNotFound));
-        
+
+        let admin = Self::get_admin(env.clone());
+        if caller == admin {
+            admin.require_auth();
+        } else if caller == asset.owner {
+            asset.owner.require_auth();
+        } else {
+            panic_with_error!(&env, ContractError::UnauthorizedOwner);
+        }
+
         // Remove asset storage
         env.storage().persistent().remove(&asset_key(asset_id));
 
@@ -660,7 +681,7 @@ mod tests {
     use soroban_sdk::testutils::storage::Persistent;
     use soroban_sdk::{
         symbol_short,
-        testutils::{Address as _, Events, Ledger as _},
+        testutils::{Address as _, Events, Ledger as _, Logs},
         Bytes, Env, String,
     };
 
@@ -884,7 +905,7 @@ mod tests {
         client.initialize_admin(&admin);
 
         client.propose_admin(&admin, &new_admin);
-        client.accept_admin(&new_admin);
+        client.accept_admin();
 
         assert_eq!(client.get_admin(), new_admin);
     }
@@ -911,6 +932,32 @@ mod tests {
     }
 
     #[test]
+    fn test_propose_admin_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        client.propose_admin(&admin, &new_admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data): (_, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) = events.get(0).unwrap();
+        assert_eq!(
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            symbol_short!("PROP_ADMIN")
+        );
+        let (emitted_admin, emitted_new_admin): (Address, Address) =
+            soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(emitted_admin, admin);
+        assert_eq!(emitted_new_admin, new_admin);
+    }
+
+    #[test]
     fn test_wrong_address_cannot_accept_admin() {
         let env = Env::default();
         env.mock_all_auths();
@@ -923,13 +970,19 @@ mod tests {
         client.initialize_admin(&admin);
         client.propose_admin(&admin, &new_admin);
 
-        let result = client.try_accept_admin(&impostor);
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::UnauthorizedAdmin as u32,
-            ))),
-        );
+        use soroban_sdk::IntoVal;
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &impostor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_admin",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_accept_admin();
+        assert!(result.is_err());
         // Original admin unchanged
         assert_eq!(client.get_admin(), admin);
     }
@@ -1338,6 +1391,53 @@ mod tests {
     }
 
     #[test]
+    fn test_transfer_asset_logs_missing_owner_index_and_keeps_old_owner_clean() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let retained_id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+        let transferred_id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3520"),
+            &owner,
+        );
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .remove(&owner_index_key(&owner));
+        });
+
+        client.transfer_asset(&transferred_id, &owner, &new_owner);
+
+        let logs = env.logs().all();
+        let warning = logs.last().unwrap();
+        assert!(warning.contains("owner index missing during remove"));
+
+        let old_owner_ids = client.get_assets_by_owner(&owner);
+        assert_eq!(old_owner_ids.len(), 0);
+        assert!(!old_owner_ids.contains(&transferred_id));
+        assert!(!old_owner_ids.contains(&retained_id));
+
+        let new_owner_ids = client.get_assets_by_owner(&new_owner);
+        assert_eq!(new_owner_ids.len(), 1);
+        assert!(new_owner_ids.contains(&transferred_id));
+
+    }
+
+    #[test]
     fn test_update_asset_metadata_removes_old_dedup_key() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1403,7 +1503,7 @@ mod tests {
         );
 
         assert_eq!(client.get_assets_by_owner(&owner).len(), 1);
-        client.deregister_asset(&id);
+        client.deregister_asset(&admin, &id);
         assert_eq!(client.get_assets_by_owner(&owner).len(), 0);
     }
 
@@ -1425,7 +1525,7 @@ mod tests {
         let id1 = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner);
         
         // Deregister removes dedup key
-        client.deregister_asset(&id1);
+        client.deregister_asset(&admin, &id1);
         
         // Same owner can now re-register the same metadata
         let id2 = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner);
@@ -1475,7 +1575,7 @@ mod tests {
         });
 
         // Deregister should not create a stale empty entry
-        client.deregister_asset(&id);
+        client.deregister_asset(&admin, &id);
 
         // Verify owner index was not recreated
         env.as_contract(&contract_id, || {
@@ -1715,6 +1815,40 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_register_assets_contiguous_ids() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+
+        // Register one asset first so ASSET_COUNT starts at 1
+        let single = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "first"),
+            &owner,
+        );
+        assert_eq!(single, 1);
+
+        // Batch of three should get IDs 2, 3, 4 — contiguous, no gaps
+        let mut batch = Vec::new(&env);
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "A") });
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "B") });
+        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "C") });
+
+        let ids = client.batch_register_assets(&owner, &batch);
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.get(0).unwrap(), 2);
+        assert_eq!(ids.get(1).unwrap(), 3);
+        assert_eq!(ids.get(2).unwrap(), 4);
+    }
+
+    #[test]
     fn test_asset_type_allowlist() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1835,22 +1969,38 @@ mod tests {
             &owner,
         );
 
-        // Only authorize the owner, not the admin — deregister_asset requires admin auth
-        use soroban_sdk::IntoVal;
-        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &owner,
-            invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "deregister_asset",
-                args: (id,).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
-
-        // Auth framework rejects the call because admin.require_auth() is not satisfied
-        assert!(client.try_deregister_asset(&id).is_err());
-        // Asset must still exist
+        // A third party (neither admin nor owner) must be rejected
+        let stranger = Address::generate(&env);
+        let result = client.try_deregister_asset(&stranger, &id);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedOwner as u32
+            )))
+        );
         assert!(client.asset_exists(&id));
+    }
+
+    #[test]
+    fn test_owner_can_deregister_own_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        client.deregister_asset(&owner, &id);
+        assert!(!client.asset_exists(&id));
     }
 
     #[test]
