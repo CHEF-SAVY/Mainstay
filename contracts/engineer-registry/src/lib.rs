@@ -20,6 +20,7 @@ pub enum ContractError {
     EngineerAlreadyRegistered = 10,
     IssuerNotFound = 11,
     PendingAdminAlreadyExists = 12,
+    InvalidValidityPeriod = 13,
 }
 
 #[contracttype]
@@ -49,6 +50,7 @@ fn engineer_key(addr: &Address) -> (Symbol, Address) {
 const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 const REG_ENG_TOPIC: Symbol = symbol_short!("REG_ENG");
 const REVOKE_TOPIC: Symbol = symbol_short!("REV_CRED");
+const MIN_VALIDITY_PERIOD: u64 = 86_400;
 
 fn is_paused(env: &Env) -> bool {
     env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
@@ -235,6 +237,9 @@ impl EngineerRegistry {
         }
         if !record.active {
             panic_with_error!(&env, ContractError::CredentialRevoked);
+        }
+        if new_validity_period < MIN_VALIDITY_PERIOD {
+            panic_with_error!(&env, ContractError::InvalidValidityPeriod);
         }
         let renewed_at = env.ledger().timestamp();
         let previous_expires_at = record.expires_at;
@@ -1258,18 +1263,40 @@ mod tests {
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&engineer, &hash, &issuer, &1000);
+        client.register_engineer(&engineer, &hash, &issuer, &86_400);
 
         // Advance past original expiry
-        env.ledger().with_mut(|li| li.timestamp = li.timestamp + 1001);
+        env.ledger().with_mut(|li| li.timestamp = li.timestamp + 86_401);
         assert!(!client.verify_engineer(&engineer));
 
-        // Renew for another 1000 seconds from now
-        client.renew_credential(&engineer, &1000);
+        // Renew for another 86_400 seconds from now
+        client.renew_credential(&engineer, &86_400);
         assert!(client.verify_engineer(&engineer));
 
         let record = client.get_engineer(&engineer);
-        assert_eq!(record.expires_at, env.ledger().timestamp() + 1000);
+        assert_eq!(record.expires_at, env.ledger().timestamp() + 86_400);
+    }
+
+    #[test]
+    fn test_renew_credential_short_validity_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+
+        let result = client.try_renew_credential(&engineer, &1);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidValidityPeriod as u32,
+            ))),
+        );
     }
 
     #[test]
