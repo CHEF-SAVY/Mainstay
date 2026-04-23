@@ -241,12 +241,6 @@ fn get_task_weight(env: &Env, task_type: &Symbol) -> u32 {
     panic_with_error!(env, ContractError::InvalidTaskType);
 }
 
-fn validate_task_type(env: &Env, task_type: &Symbol) {
-    if task_type == &symbol_short!("") {
-        panic_with_error!(env, ContractError::InvalidTaskType);
-    }
-}
-
 fn validate_notes_length(env: &Env, notes: &soroban_sdk::String, max: u32) {
     if notes.len() > max {
         panic_with_error!(env, ContractError::InvalidConfig);
@@ -594,7 +588,8 @@ impl Lifecycle {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
         validate_notes_length(&env, &notes, config.max_notes_length);
-        validate_task_type(&env, &task_type);
+        // Validate task type early before cross-contract calls
+        let weight = get_task_weight(&env, &task_type);
 
         // Verify asset exists
         let asset_registry: Address = env
@@ -651,7 +646,6 @@ impl Lifecycle {
             .persistent()
             .get(&score_key(asset_id))
             .unwrap_or(0u32);
-        let weight = get_task_weight(&env, &task_type);
         let new_score = (score + weight).min(100);
         env.storage()
             .persistent()
@@ -732,11 +726,12 @@ impl Lifecycle {
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
+        let mut weights = Vec::new(&env);
         for (i, record) in records.iter().enumerate() {
-            validate_task_type(&env, &record.task_type);
             validate_notes_length(&env, &record.notes, config.max_notes_length);
-            // Validate task weight exists (will panic with InvalidTaskType if unknown)
-            let _ = get_task_weight(&env, &record.task_type);
+            // Validate task weight exists and collect weight
+            let weight = get_task_weight(&env, &record.task_type);
+            weights.push_back(weight);
             // Log index for debugging
             env.events().publish((symbol_short!("VAL_IDX"), i as u32), ());
         }
@@ -754,8 +749,8 @@ impl Lifecycle {
             .get(&score_key(asset_id))
             .unwrap_or(0u32);
 
-        for record in records.iter() {
-            let weight = get_task_weight(&env, &record.task_type);
+        for (i, record) in records.iter().enumerate() {
+            let weight = weights.get(i as u32).unwrap();
             score = (score + weight).min(100);
             history.push_back(MaintenanceRecord {
                 asset_id,
