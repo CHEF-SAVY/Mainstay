@@ -18,7 +18,7 @@ pub enum ContractError {
     Paused = 7,
     InvalidAssetType = 8,
     PendingAdminAlreadyExists = 9,
->>>>>>> origin/main
+    TypeInUse = 10,
 }
 
 #[contracttype]
@@ -71,6 +71,25 @@ fn owner_index_key(owner: &Address) -> (Symbol, Address) {
 /// Asset type allowlist key: asset_type → bool.
 fn asset_type_key(asset_type: &Symbol) -> (Symbol, Symbol) {
     (ASSET_TYPE_PREFIX, asset_type.clone())
+}
+
+/// Asset type count key: asset_type → u64 (number of registered assets of this type).
+fn type_count_key(asset_type: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("AST_CNT"), asset_type.clone())
+}
+
+fn type_count_inc(env: &Env, asset_type: &Symbol) {
+    let key = type_count_key(asset_type);
+    let count: u64 = env.storage().instance().get(&key).unwrap_or(0);
+    env.storage().instance().set(&key, &(count + 1));
+}
+
+fn type_count_dec(env: &Env, asset_type: &Symbol) {
+    let key = type_count_key(asset_type);
+    let count: u64 = env.storage().instance().get(&key).unwrap_or(0);
+    if count > 0 {
+        env.storage().instance().set(&key, &(count - 1));
+    }
 }
 
 /// Append an asset ID to the owner's index.
@@ -176,6 +195,9 @@ impl AssetRegistry {
         // Update owner index
         owner_index_add(&env, &owner, id);
 
+        // Increment type count
+        type_count_inc(&env, &asset_type);
+
         // Emit asset registration event
         env.events().publish(
             (symbol_short!("REG_AST"), id),
@@ -247,6 +269,9 @@ impl AssetRegistry {
                 .extend_ttl(&dedup_key(&owner, &meta_hash), 518400, 518400);
 
             owner_index_add(&env, &owner, id);
+
+            // Increment type count
+            type_count_inc(&env, &asset_in.asset_type);
 
             env.events().publish(
                 (symbol_short!("REG_AST"), id),
@@ -505,6 +530,9 @@ impl AssetRegistry {
         // Remove from owner index
         owner_index_remove(&env, &asset.owner, asset_id);
 
+        // Decrement type count
+        type_count_dec(&env, &asset.asset_type);
+
         // Emit deregistration event
         env.events().publish(
             (DEREG_TOPIC, asset_id),
@@ -684,16 +712,27 @@ impl AssetRegistry {
     }
 
     /// Admin-only function to remove an asset type from the allowlist.
-    /// Existing assets of this type are not affected, but no new ones can be registered.
+    /// Removal is blocked if any registered assets of this type still exist.
     ///
     /// # Arguments
     /// * `admin` - The address that must match the stored admin
     /// * `asset_type` - The symbol of the asset type to remove
+    ///
+    /// # Panics
+    /// - [`ContractError::TypeInUse`] if one or more assets of this type are still registered
     pub fn remove_asset_type(env: Env, admin: Address, asset_type: Symbol) {
         admin.require_auth();
         let stored_admin: Address = Self::get_admin(env.clone());
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&type_count_key(&asset_type))
+            .unwrap_or(0);
+        if count > 0 {
+            panic_with_error!(&env, ContractError::TypeInUse);
         }
         env.storage()
             .instance()
@@ -945,7 +984,7 @@ mod tests {
         client.initialize_admin(&admin);
 
         client.propose_admin(&admin, &new_admin);
-        client.accept_admin();
+        client.accept_admin(&new_admin);
 
         assert_eq!(client.get_admin(), new_admin);
     }
@@ -962,7 +1001,7 @@ mod tests {
         client.initialize_admin(&admin);
 
         client.propose_admin(&admin, &new_admin);
-        client.accept_admin();
+        client.accept_admin(&new_admin);
 
         env.as_contract(&contract_id, || {
             assert!(!env.storage().instance().has(&PENDING_ADMIN_KEY));
@@ -1036,12 +1075,12 @@ mod tests {
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "accept_admin",
-                args: ().into_val(&env),
+                args: (&impostor,).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        let result = client.try_accept_admin();
+        let result = client.try_accept_admin(&impostor);
         assert!(result.is_err());
         // Original admin unchanged
         assert_eq!(client.get_admin(), admin);
@@ -1893,8 +1932,14 @@ mod tests {
 
         let owner = Address::generate(&env);
         let mut batch = Vec::new(&env);
-        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "A") });
-        batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "B") });
+        batch.push_back(AssetInput {
+            asset_type: symbol_short!("GENSET"),
+            metadata: String::from_str(&env, "A"),
+        });
+        batch.push_back(AssetInput {
+            asset_type: symbol_short!("GENSET"),
+            metadata: String::from_str(&env, "B"),
+        });
 
         client.batch_register_assets(&owner, &batch);
 
@@ -2000,7 +2045,8 @@ mod tests {
             )))
         );
 
-        // Remove the type
+        // Remove the type — must deregister the asset first
+        client.deregister_asset(&owner, &id);
         client.remove_asset_type(&admin, &valid_type);
         assert!(!client.is_valid_asset_type(&valid_type));
 
@@ -2124,14 +2170,12 @@ mod tests {
         let events = env.events().all();
         let (_, topics, data): (_, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
             events.last().unwrap();
-        assert_eq!(
-            soroban_sdk::Val::from(topics.get(0).unwrap()),
-            soroban_sdk::Val::from(DEREG_TOPIC)
-        );
-        assert_eq!(
-            soroban_sdk::Val::from(topics.get(1).unwrap()),
-            soroban_sdk::Val::from(id)
-        );
+        use soroban_sdk::IntoVal;
+        let topic0: soroban_sdk::Val =
+            <Symbol as IntoVal<Env, soroban_sdk::Val>>::into_val(&DEREG_TOPIC, &env);
+        let topic1: soroban_sdk::Val = <u64 as IntoVal<Env, soroban_sdk::Val>>::into_val(&id, &env);
+        assert_eq!(topics.get(0).unwrap().get_payload(), topic0.get_payload());
+        assert_eq!(topics.get(1).unwrap().get_payload(), topic1.get_payload());
         let (emitted_type, emitted_owner): (Symbol, Address) =
             soroban_sdk::FromVal::from_val(&env, &data);
         assert_eq!(emitted_type, symbol_short!("GENSET"));
@@ -2153,5 +2197,41 @@ mod tests {
                 ContractError::AssetNotFound as u32
             )))
         );
+    }
+
+    #[test]
+    fn test_remove_asset_type_blocked_while_assets_exist() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        // Removal must be rejected while the asset still exists
+        assert_eq!(
+            client.try_remove_asset_type(&admin, &symbol_short!("GENSET")),
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::TypeInUse as u32
+            )))
+        );
+
+        // Existing asset is still intact
+        assert!(client.asset_exists(&id));
+        assert!(client.is_valid_asset_type(&symbol_short!("GENSET")));
+
+        // After deregistering the asset the type can be removed
+        client.deregister_asset(&owner, &id);
+        client.remove_asset_type(&admin, &symbol_short!("GENSET"));
+        assert!(!client.is_valid_asset_type(&symbol_short!("GENSET")));
     }
 }
