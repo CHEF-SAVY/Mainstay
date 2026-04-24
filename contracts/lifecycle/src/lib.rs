@@ -4707,7 +4707,6 @@ mod tests {
         let config = client.get_config();
         assert_eq!(config.score_increment, 10);
     }
-<<<<<<< fix/transfer-asset-lifecycle-history
 
     #[test]
     fn test_post_transfer_maintenance_history_access() {
@@ -4823,83 +4822,6 @@ mod tests {
             0,
             "score history cleared after purge"
         );
-=======
-    #[test]
-    fn test_update_max_notes_length_stores_new_value() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let (client, _, _, admin) = setup(&env, 0);
-
-        // Default is 256; update to 64 and verify it is persisted.
-        client.update_max_notes_length(&admin, &64u32);
-        assert_eq!(client.get_config().max_notes_length, 64);
-    }
-
-    #[test]
-    fn test_update_max_notes_length_non_admin_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let (client, _, _, _) = setup(&env, 0);
-        let non_admin = Address::generate(&env);
-
-        let result = client.try_update_max_notes_length(&non_admin, &64u32);
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::UnauthorizedAdmin as u32,
-            ))),
-        );
-    }
-
-    #[test]
-    fn test_update_max_notes_length_zero_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let (client, _, _, admin) = setup(&env, 0);
-
-        let result = client.try_update_max_notes_length(&admin, &0u32);
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::InvalidConfig as u32,
-            ))),
-        );
-    }
-
-    #[test]
-    fn test_oversized_note_rejected_after_update() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 0);
-        let asset_id = register_asset(&env, &asset_registry_client);
-        let engineer = register_engineer(&env, &engineer_registry_client);
-
-        // Tighten the limit to 10 bytes.
-        client.update_max_notes_length(&admin, &10u32);
-
-        // An 11-byte note must be rejected.
-        let long_note = String::from_str(&env, "12345678901");
-        let result = client.try_submit_maintenance(
-            &asset_id,
-            &symbol_short!("OIL_CHG"),
-            &long_note,
-            &engineer,
-        );
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::InvalidConfig as u32,
-            ))),
-        );
-
-        // A note within the new limit must succeed.
-        let short_note = String::from_str(&env, "1234567890");
-        client.submit_maintenance(&asset_id, &symbol_short!("OIL_CHG"), &short_note, &engineer);
-        assert_eq!(client.get_maintenance_history(&asset_id).len(), 1);
->>>>>>> main
+      main
     }
 }
