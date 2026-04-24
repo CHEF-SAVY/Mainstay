@@ -904,16 +904,12 @@ impl Lifecycle {
     /// * `asset_id` - The unique identifier of the asset
     ///
     /// # Returns
-    /// The MaintenanceRecord with the highest timestamp for the asset
-    ///
-    /// # Panics
-    /// - [`ContractError::NoMaintenanceHistory`] if no maintenance history exists
-    pub fn get_last_service(env: Env, asset_id: u64) -> MaintenanceRecord {
+    /// `Some(MaintenanceRecord)` with the highest timestamp, or `None` if no history exists
+    pub fn get_last_service(env: Env, asset_id: u64) -> Option<MaintenanceRecord> {
         let history: Vec<MaintenanceRecord> = env
             .storage()
             .persistent()
-            .get(&history_key(asset_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoMaintenanceHistory));
+            .get(&history_key(asset_id))?;
 
         let mut best: Option<MaintenanceRecord> = None;
         for i in 0..history.len() {
@@ -923,7 +919,7 @@ impl Lifecycle {
                 best = Some(record);
             }
         }
-        best.unwrap_or_else(|| panic_with_error!(&env, ContractError::NoMaintenanceHistory))
+        best
     }
 
     /// Get the current collateral score for an asset.
@@ -1642,13 +1638,16 @@ mod tests {
 
         let (client, asset_registry_client, _, _) = setup(&env, 0);
         let asset_id = register_asset(&env, &asset_registry_client);
-        let result = client.try_get_last_service(&asset_id);
-        assert_eq!(
-            result,
-            Err(Ok(soroban_sdk::Error::from_contract_error(
-                ContractError::NoMaintenanceHistory as u32,
-            ))),
-        );
+        assert_eq!(client.get_last_service(&asset_id), None);
+    }
+
+    #[test]
+    fn test_get_last_service_no_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+        assert_eq!(client.get_last_service(&9999u64), None);
     }
 
     #[test]
@@ -1678,7 +1677,7 @@ mod tests {
             &engineer,
         );
 
-        let last = client.get_last_service(&asset_id);
+        let last = client.get_last_service(&asset_id).unwrap();
         assert_eq!(last.timestamp, 2000);
         assert_eq!(last.task_type, symbol_short!("INSPECT"));
     }
@@ -3397,7 +3396,7 @@ mod tests {
         assert!(lifecycle.is_collateral_eligible(&asset_id));
 
         // 5. Assert get_last_service returns the correct record
-        let last = lifecycle.get_last_service(&asset_id);
+        let last = lifecycle.get_last_service(&asset_id).unwrap();
         assert_eq!(last.asset_id, asset_id);
         assert_eq!(last.engineer, engineer);
         assert_eq!(last.task_type, symbol_short!("ENGINE"));
@@ -4215,6 +4214,6 @@ mod tests {
         assert_eq!(asset_registry.get_asset(&asset_id).owner, new_owner);
         assert_eq!(lifecycle.get_collateral_score(&asset_id), 50);
         assert!(lifecycle.is_collateral_eligible(&asset_id));
-        assert_eq!(lifecycle.get_last_service(&asset_id).engineer, engineer);
+        assert_eq!(lifecycle.get_last_service(&asset_id).unwrap().engineer, engineer);
     }
 }
